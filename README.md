@@ -1,2 +1,2 @@
 ### PyTrading: Console Edition
-This simple console app was build to help me understand both trading and Python better.
+This simple console app is built to help me understand both trading and Python better.
