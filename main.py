@@ -2,6 +2,7 @@ import json
 import random
 from decimal import Decimal
 import bcrypt
+from datetime import datetime, timezone, timedelta
 
 # Global state
 users = {}
@@ -55,7 +56,7 @@ def register():
     elif len(password) < 5:
       print("Password must be at least 5 characters")
     else:
-      salt = bcrypt.gensalt()
+      salt = bcrypt.gensalt() # We only need salt generation when hashing new passwords
       # TypeError: Strings must be encoded before hashing
       # Refer to https://stackoverflow.com/questions/76237943/bcrypt-error-typeerror-strings-must-be-encoded-before-hashing
       password_encoded = password.encode("utf-8")
@@ -88,17 +89,20 @@ def login():
       else:
         break
 
-    salt = bcrypt.gensalt()
-    # TypeError: Strings must be encoded before hashing
-    # Refer to https://stackoverflow.com/questions/76237943/bcrypt-error-typeerror-strings-must-be-encoded-before-hashing
-    password_encoded = password.encode("utf-8")
-    stored_password = bcrypt.hashpw(users[username]["password"].encode("utf-8"), salt)
-    if username not in users or bcrypt.checkpw(password_encoded, stored_password):
+    if username not in users:
       print("Invalid username/password. Please try again.")
-    else:
+      continue
+
+    # Check entered password against stored hashed value
+    # Refer to https://www.geeksforgeeks.org/python/hashing-passwords-in-python-with-bcrypt/
+    password_encoded = password.encode("utf-8")
+    stored_password = users[username]["password"].encode("utf-8") # Already hashed
+    if bcrypt.checkpw(password_encoded, stored_password): # Compares byte values
       print("Successfully logged in!\n")
       session["user"] = username
       break
+    else:
+      print("Invalid username/password. Please try again.")
 
 def init_market(assets):
   for asset in assets:
@@ -106,7 +110,9 @@ def init_market(assets):
     market[asset] = {"price": price, "history": []}
 
 def update_market():
-  # TODO: Unrealized P&L is zero unless this is called
+  # Note: Unrealized P&L is zero unless this is called again since the market price
+  # from when a user bought it hasn't changed unless the update of market data
+  # happens on the background as a separate process
   for asset in market:
     change = Decimal(random.uniform(-5, 5)) # Simulate volatility
     market[asset]["price"] += change
@@ -115,8 +121,13 @@ def update_market():
       market[asset]["price"] = 0
     
     market[asset]["history"].append(market[asset]["price"])
-    
-  print("Successfully refreshed market data!")
+  
+  # Timezone-aware datetime object
+  # Refer to https://stackoverflow.com/questions/3327946/how-can-i-get-the-current-time-now-in-utc
+  utc_datetime = datetime.now(timezone.utc) 
+  ph_datetime = utc_datetime + timedelta(hours=8) # Convert UTC to Philippine datetime
+  iso_format = ph_datetime.strftime("%Y-%m-%d %H:%M:%S") # Example: "2026-03-01 21:25:00"
+  print(f"Successfully refreshed market data as of {iso_format}")
 
 def place_order(current_user):
   if current_user is None or current_user == "":
@@ -147,14 +158,13 @@ def place_order(current_user):
       print("Please provide a quantity first")
       continue
     
-    # Check if valid integer
+    # Check if valid float value
     try:
-      _ = int(quantity) # TODO: Change this
+      quantity = float(quantity)
     except ValueError:
       print("Invalid quantity value")
       continue
     
-    quantity = int(quantity)
     if quantity <= 0:
       print("Quantity must be positive")
     else:
@@ -195,18 +205,20 @@ def place_order(current_user):
 
   # Save to order history
   users[current_user]["history"].append({"action": action, "asset": asset, "quantity": quantity, "price": price})
-  print(f"Order executed! Action = {action}, Stock = {asset}, Price = {price:.2f}, Quantity = {quantity}, Cost = {cost:.2f}")
+  print(f"Order executed! Action = {action}, Stock = {asset}, Price = {price:.2f}, Quantity = {quantity:.2f}, Cost = {cost:.2f}")
+
+  save_data()
 
 def view_market(market):
   print("\nMarket:")
 
   for asset in market:
-    print(f"{asset} = {market[asset]["price"]}")
+    print(f"{asset} = {market[asset]["price"]:.2f}")
     
     if len(market[asset]["history"]) > 0:
       truncated_history = market[asset]["history"] 
       truncated_history = truncated_history[::-1][:5] # Take top five recent
-      print("History (recent prices):")
+      print("Prices (recent):")
       for prev_price in truncated_history:
         print(f"{prev_price:.2f}")
     print()
@@ -222,7 +234,7 @@ def view_portfolio(current_user):
   print(f"\nYour portfolio\n")
   print("Positions\t Shares\t Market Price\t Market Value\t Unrealized P&L")
   for stock, details in users[current_user]["portfolio"].items():
-    qty = details["quantity"]
+    qty = Decimal(details["quantity"])
     cost_basis = details["cost_basis"]
     
     market_price = market[stock]["price"]
@@ -248,7 +260,8 @@ def view_history(current_user):
   
   print("Action\t Stock\t Quantity\t Price")
   for history in history_list:
-    print(f"{history["action"]}\t {history["asset"]}\t {history["quantity"]}\t\t {history["price"]:.2f}")
+    price = Decimal(history["price"])
+    print(f"{history["action"]}\t {history["asset"]}\t {history["quantity"]:.2f}\t\t {price:.2f}")
 
 def save_data():
   # Note: type Decimal is not JSON serializable
@@ -273,8 +286,8 @@ def load_data():
       # Make sure to convert quantity and cost_basis to int and Decimal respectively
       for user in users:
         for asset in users[user]["portfolio"]:
-          users[user]["portfolio"][asset]["quantity"] = int(users[user]["portfolio"][asset]["quantity"])
-          users[user]["portfolio"][asset]["cost_basis"] = Decimal(users[user]["portfolio"][asset]["quantity"])
+          users[user]["portfolio"][asset]["quantity"] = float(users[user]["portfolio"][asset]["quantity"])
+          users[user]["portfolio"][asset]["cost_basis"] = Decimal(users[user]["portfolio"][asset]["cost_basis"])
       
       # When loading market data, the prices are mapped to float type
       # Make sure to convert them to Decimal
@@ -282,7 +295,9 @@ def load_data():
       for asset in market:
         market[asset]["price"] = Decimal(market[asset]["price"])
   except FileNotFoundError:
-    pass
+    print("File cannot be found")
+  except Exception as e:
+    print("Corrupted save file", e)
 
 def main():
   global session, market
@@ -314,6 +329,7 @@ def main():
       view_market(market)
     elif choice == "4": # Refresh market
       update_market()
+      save_data()
     elif choice == "5": # Place order
       place_order(session["user"])
     elif choice == "6": # View portfolio
@@ -324,6 +340,7 @@ def main():
       if session["user"] is None or session["user"] == "":
         print("You must log in first")
         continue
+      save_data()
       session["user"] = ""
       print("You have successfully logged out!")
     elif choice == "9": # Exit program
@@ -335,7 +352,5 @@ def main():
     else:
       print("Invalid choice")
     
-    save_data()
-
 if __name__ == "__main__":
   main()
