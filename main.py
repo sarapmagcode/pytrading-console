@@ -4,6 +4,9 @@ from decimal import Decimal
 import bcrypt
 from datetime import datetime, timezone, timedelta
 
+# Constants
+TRADE_FEE_PCT = Decimal("0.002") # 0.2%
+
 # Global state
 users = {}
 market = {}
@@ -158,9 +161,9 @@ def place_order(current_user):
       print("Please provide a quantity first")
       continue
     
-    # Check if valid float value
+    # Check if valid Decimal value
     try:
-      quantity = float(quantity)
+      quantity = Decimal(quantity)
     except ValueError:
       print("Invalid quantity value")
       continue
@@ -171,41 +174,49 @@ def place_order(current_user):
       break
   
   price = Decimal(market[asset]["price"])
-  cost = price * Decimal(quantity) # TODO: Add fee
+  cost = price * quantity
+  fee = cost * TRADE_FEE_PCT
+  total_cost = cost + fee
 
   # ---------------- BUY ----------------
   if action == "BUY":
-    if users[current_user]["balance"] < cost:
-      print("Insufficient balance")
+    if users[current_user]["balance"] < total_cost:
+      print(f"Insufficient balance (required: {total_cost:.2f} incl. {fee:.2f} fee)")
       return
 
-    users[current_user]["balance"] -= cost
+    users[current_user]["balance"] -= total_cost
+    
     if asset not in users[current_user]["portfolio"]:
-      users[current_user]["portfolio"][asset] = {"quantity": quantity, "cost_basis": cost}
+      users[current_user]["portfolio"][asset] = {"quantity": quantity, "cost_basis": total_cost}
     else:
       users[current_user]["portfolio"][asset]["quantity"] += quantity
-      users[current_user]["portfolio"][asset]["cost_basis"] += cost
+      users[current_user]["portfolio"][asset]["cost_basis"] += total_cost
 
   # ---------------- SELL ----------------
   elif action == "SELL":
     if asset not in users[current_user]["portfolio"] or users[current_user]["portfolio"][asset]["quantity"] < quantity:
-      print("Insufficient holdings")
+      diff = quantity - users[current_user]["portfolio"][asset]["quantity"]
+      print(f"Insufficient holdings (required: at least {diff:.2f} more shares)")
       return
+    
+    proceeds = cost - fee
+    if proceeds < 0: # Rare edge case
+      proceeds = Decimal(0) 
 
-    users[current_user]["balance"] = Decimal(users[current_user]["balance"]) + Decimal(cost)
+    users[current_user]["balance"] += proceeds
     users[current_user]["portfolio"][asset]["quantity"] -= quantity
 
-    # Note: Don't change cost_basis here- it stays as total historical cost
+    # Note: Don't change cost_basis here - it stays as total historical cost
     if users[current_user]["portfolio"][asset]["quantity"] <= 0:
       del users[current_user]["portfolio"][asset]
-
+      
   else:
     print("Invalid action")
     return
 
   # Save to order history
-  users[current_user]["history"].append({"action": action, "asset": asset, "quantity": quantity, "price": price})
-  print(f"Order executed! Action = {action}, Stock = {asset}, Price = {price:.2f}, Quantity = {quantity:.2f}, Cost = {cost:.2f}")
+  users[current_user]["history"].append({"action": action, "asset": asset, "quantity": quantity, "price": price, "fee": fee})
+  print(f"Order executed! {action} {quantity:.2f} {asset} @ {price:.2f} | Fee: {fee:.2f} | Net: {proceeds if action == "SELL" else -total_cost:+.2f}")
 
   save_data()
 
@@ -258,10 +269,15 @@ def view_history(current_user):
     print("You don't have any orders yet")
     return
   
-  print("Action\t Stock\t Quantity\t Price")
+  
+  print("Action\t Stock\t Quantity\t Price\t\t Fee")
   for history in history_list:
     price = Decimal(history["price"])
-    print(f"{history["action"]}\t {history["asset"]}\t {history["quantity"]:.2f}\t\t {price:.2f}")
+    fee = Decimal(0)
+    if "fee" in history:
+      fee = history["fee"]
+      
+    print(f"{history["action"]}\t {history["asset"]}\t {history["quantity"]:.2f}\t\t {price:.2f}\t\t {fee:.2f}")
 
 def save_data():
   # Note: type Decimal is not JSON serializable
@@ -286,7 +302,7 @@ def load_data():
       # Make sure to convert quantity and cost_basis to int and Decimal respectively
       for user in users:
         for asset in users[user]["portfolio"]:
-          users[user]["portfolio"][asset]["quantity"] = float(users[user]["portfolio"][asset]["quantity"])
+          users[user]["portfolio"][asset]["quantity"] = Decimal(users[user]["portfolio"][asset]["quantity"])
           users[user]["portfolio"][asset]["cost_basis"] = Decimal(users[user]["portfolio"][asset]["cost_basis"])
       
       # When loading market data, the prices are mapped to float type
