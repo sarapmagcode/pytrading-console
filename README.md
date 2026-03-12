@@ -11,6 +11,7 @@ This uses fake generated market data. Both the market and user data are currenly
 - [x] Place order
 - [x] View portfolio
 - [x] View history
+- [x] Place limit order
 - [x] Log out
 - [x] Exit program
 

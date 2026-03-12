@@ -113,14 +113,16 @@ def init_market(assets):
     market[asset] = {"price": price, "history": []}
 
 def update_market():
-  # Note: Unrealized P&L is zero unless this is called again since the market price
-  # from when a user bought it hasn't changed unless the update of market data
-  # happens on the background as a separate process
+  """
+  Note: Unrealized P&L for a new order is zero if this function is not called again since the market 
+  price of an asset when a user placed an order hasn't changed (unless the market data update happens 
+  on the background as a separate process)
+  """
   for asset in market:
     change = Decimal(random.uniform(-5, 5)) # Simulate volatility
     market[asset]["price"] += change
     
-    if market[asset]["price"] < 0: # It cannot be a SELL
+    if market[asset]["price"] < 0:
       market[asset]["price"] = 0
     
     market[asset]["history"].append(market[asset]["price"])
@@ -130,7 +132,39 @@ def update_market():
   utc_datetime = datetime.now(timezone.utc) 
   ph_datetime = utc_datetime + timedelta(hours=8) # Convert UTC to Philippine datetime
   iso_format = ph_datetime.strftime("%Y-%m-%d %H:%M:%S") # Example: "2026-03-01 21:25:00"
-  print(f"Successfully refreshed market data as of {iso_format}")
+  print(f"[{iso_format}] Successfully refreshed market data")
+
+def check_pending_orders():
+  executed = []
+  for username, data in users.items(): # key-value pairs
+    if "pending_orders" not in data:
+      data["pending_orders"] = []
+      continue
+    
+    # Process orders (per user)
+    orders = data["pending_orders"]
+    new_orders = []
+    for order in orders:
+      current_price = market[order["asset"]]["price"]
+
+      action = order["action"]
+      asset = order["asset"]
+      limit_price = order["limit_price"]
+      quantity = order["quantity"]
+
+      if action == "BUY" and current_price <= limit_price:
+        execute_order(action, username, asset, limit_price, quantity, is_limit_order=True)
+        executed.append((username, order))
+      elif action == "SELL" and current_price >= limit_price:
+        execute_order(action, username, asset, limit_price, quantity, is_limit_order=True)
+        executed.append((username, order))
+      else:
+        new_orders.append(order)
+
+    data["pending_orders"] = new_orders
+  
+  if executed:
+    print(f"Executed {len(executed)} pending limit order(s)")
 
 def place_order(current_user):
   if current_user is None or current_user == "":
@@ -142,7 +176,7 @@ def place_order(current_user):
     if asset is None or asset == "":
       print("Please provide an asset first") 
     elif asset not in market:
-      print("Invalid asset")
+      print("Asset not found in market")
     else:
       break
 
@@ -172,8 +206,11 @@ def place_order(current_user):
       print("Quantity must be positive")
     else:
       break
-  
+ 
   price = Decimal(market[asset]["price"])
+  execute_order(action, current_user, asset, price, quantity)
+  
+def execute_order(action, current_user, asset, price, quantity, is_limit_order=False): 
   cost = price * quantity
   fee = cost * TRADE_FEE_PCT
   total_cost = cost + fee
@@ -181,7 +218,8 @@ def place_order(current_user):
   # ---------------- BUY ----------------
   if action == "BUY":
     if users[current_user]["balance"] < total_cost:
-      print(f"Insufficient balance (required: {total_cost:.2f} incl. {fee:.2f} fee)")
+      if not is_limit_order: # Display error message if auto-execute order
+        print(f"Insufficient balance (required: {total_cost:.2f} incl. {fee:.2f} fee)")
       return
 
     users[current_user]["balance"] -= total_cost
@@ -191,17 +229,18 @@ def place_order(current_user):
     else:
       users[current_user]["portfolio"][asset]["quantity"] += quantity
       users[current_user]["portfolio"][asset]["cost_basis"] += total_cost
-
+  
   # ---------------- SELL ----------------
   elif action == "SELL":
     if asset not in users[current_user]["portfolio"] or users[current_user]["portfolio"][asset]["quantity"] < quantity:
-      diff = quantity - users[current_user]["portfolio"][asset]["quantity"]
-      print(f"Insufficient holdings (required: at least {diff:.2f} more shares)")
+      if not is_limit_order: # Display error message if auto-execute order
+        diff = quantity - users[current_user]["portfolio"][asset]["quantity"]
+        print(f"Insufficient holdings (required: at least {diff:.2f} more shares)")
       return
     
     proceeds = cost - fee
     if proceeds < 0: # Rare edge case
-      proceeds = Decimal(0) 
+      proceeds = Decimal(0)
 
     users[current_user]["balance"] += proceeds
     users[current_user]["portfolio"][asset]["quantity"] -= quantity
@@ -211,7 +250,8 @@ def place_order(current_user):
       del users[current_user]["portfolio"][asset]
       
   else:
-    print("Invalid action")
+    if not is_limit_order:
+      print("Invalid action")
     return
 
   # Save to order history
@@ -315,6 +355,85 @@ def load_data():
   except Exception as e:
     print("Corrupted save file", e)
 
+def place_limit_order(current_user):
+  if current_user is None or current_user == "":
+    print("You must log in first")
+    return
+  
+  while True:
+    asset = input("Enter asset (e.g., AAPL): ").strip().upper()
+    if asset is None or asset == "":
+      print("Please provide an asset first")
+    elif asset not in market:
+      print("Asset not found in market")
+    else:
+      break
+  
+  while True:
+    action = input("Buy or Sell: ").strip().upper()
+    if action is None or action == "":
+      print("Please provide an action first")
+    elif action != "BUY" and action != "SELL":
+      print("Buy or Sell only")
+    else:
+      break
+  
+  while True:
+    quantity = input("Quantity: ").strip()
+    if quantity is None or quantity == "":
+      print("Please provide a quantity first")
+      continue
+    
+    # Check if valid Decimal value
+    try:
+      quantity = Decimal(quantity)
+    except ValueError:
+      print("Invalid quantity value")
+      continue
+
+    if quantity <= 0:
+      print("Quantity must be positive")
+    else:
+      break
+  
+  while True:
+    limit_price = input("Limit Price: ").strip()
+    if license is None or limit_price == "":
+      print("Please provide a limit price first")
+      continue
+    
+    # Check if valid Decimal value
+    try:
+      limit_price = Decimal(limit_price)
+    except ValueError:
+      print("Invalid limit price value")
+      continue
+
+    if limit_price <= 0:
+      print("Limit price must be positive")
+    else:
+      break
+  
+  utc_datetime = datetime.now(timezone.utc) 
+  ph_datetime = utc_datetime + timedelta(hours=8) # Convert UTC to Philippine datetime
+  iso_format = ph_datetime.strftime("%Y-%m-%d %H:%M:%S") # Example: "2026-03-01 21:25:00"
+  
+  limit_order = {
+    "type": "LIMIT",
+    "action": action,
+    "asset": asset,
+    "quantity": quantity,
+    "limit_price": limit_price,
+    "date_entry": iso_format
+  }
+  
+  if "pending_orders" not in users[current_user]: # If key doesn't exist yet
+    users[current_user]["pending_orders"] = [limit_order]
+  else:
+    users[current_user]["pending_orders"].append(limit_order)
+
+  print(f"[{iso_format}] Limit order placed! {action} {quantity:.2f} {asset} @ {limit_price:.2f}")
+  
 def main():
   global session, market
   
@@ -332,8 +451,9 @@ def main():
     print("5. Place order")
     print("6. View portfolio")
     print("7. View history")
-    print("8. Log out")
-    print("9. Exit program")
+    print("8. Place limit order")
+    print("9. Log out")
+    print("10. Exit program")
 
     choice = input("\nEnter choice: ")
 
@@ -352,21 +472,25 @@ def main():
       view_portfolio(session["user"])
     elif choice == "7": # View history
       view_history(session["user"])
-    elif choice == "8": # Log out
+    elif choice == "8": # Place limit order
+      place_limit_order(session["user"])
+    elif choice == "9": # Log out
       if session["user"] is None or session["user"] == "":
         print("You must log in first")
         continue
       save_data()
       session["user"] = ""
       print("You have successfully logged out!")
-    elif choice == "9": # Exit program
-      if session["user"] is None or session["user"] == "":
-        session["user"] = ""
+    elif choice == "10": # Exit program
+      session["user"] = "" # Make sure session is cleared
       print("Exiting program...")
       save_data()
       exit()
     else:
       print("Invalid choice")
+
+    # Process after every refresh
+    check_pending_orders()
     
 if __name__ == "__main__":
   main()
