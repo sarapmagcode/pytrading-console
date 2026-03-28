@@ -4,6 +4,25 @@ from decimal import Decimal
 import bcrypt
 from datetime import datetime, timezone, timedelta
 
+"""
+Creation of virtual environments in Python:
+
+1) Create virtual environment (if there's already an env, proceed to #2):
+python -m venv .venv
+
+2) Activate virtual environment:
+source .venv/bin/activate
+
+3) Install packages:
+pip install bcrypt
+
+4) Generate requirements.txt:
+pip freeze > requirements.txt
+
+5) Deactivate a virtual environment:
+deactivate
+"""
+
 # Constants
 TRADE_FEE_PCT = Decimal("0.002") # 0.2%
 
@@ -21,7 +40,7 @@ class JSONEncoder(json.JSONEncoder):
       - https://stackoverflow.com/questions/69104540/python-json-typeerror-object-of-type-decimal-is-not-json-serializable
       - https://github.com/open-contracting/spoonbill-web/issues/120
       """
-      return float(obj)
+      return str(obj) # Prevents money from drifting after save/load
       
     if isinstance(obj, bytes):
       """
@@ -153,10 +172,10 @@ def check_pending_orders():
       quantity = order["quantity"]
 
       if action == "BUY" and current_price <= limit_price:
-        execute_order(action, username, asset, limit_price, quantity, is_limit_order=True)
+        execute_order(action, username, asset, current_price, quantity, is_limit_order=True)
         executed.append((username, order))
       elif action == "SELL" and current_price >= limit_price:
-        execute_order(action, username, asset, limit_price, quantity, is_limit_order=True)
+        execute_order(action, username, asset, current_price, quantity, is_limit_order=True)
         executed.append((username, order))
       else:
         new_orders.append(order)
@@ -224,11 +243,12 @@ def execute_order(action, current_user, asset, price, quantity, is_limit_order=F
 
     users[current_user]["balance"] -= total_cost
     
+    # Note: Don't include fee in cost basis
     if asset not in users[current_user]["portfolio"]:
-      users[current_user]["portfolio"][asset] = {"quantity": quantity, "cost_basis": total_cost}
+      users[current_user]["portfolio"][asset] = {"quantity": quantity, "cost_basis": cost}
     else:
       users[current_user]["portfolio"][asset]["quantity"] += quantity
-      users[current_user]["portfolio"][asset]["cost_basis"] += total_cost
+      users[current_user]["portfolio"][asset]["cost_basis"] += cost
   
   # ---------------- SELL ----------------
   elif action == "SELL":
@@ -243,19 +263,33 @@ def execute_order(action, current_user, asset, price, quantity, is_limit_order=F
       proceeds = Decimal(0)
 
     users[current_user]["balance"] += proceeds
+  
+    quantity_before = users[current_user]["portfolio"][asset]["quantity"]
     users[current_user]["portfolio"][asset]["quantity"] -= quantity
 
-    # Note: Don't change cost_basis here - it stays as total historical cost
+    """
+    cost_basis = represents the total amount spent to acquire the shares
+    When you sell some shares, you should proportionally reduce the cost basis
+
+    For example: 
+    If you bought 10 shares at 100 each (1000 total cost_basis), and then 
+    sell 5 shares, your remaining cost_basis should be 500 (not 1000)
+    """
+    # Proportionally reduce the cost basis
+    sold_ratio = quantity / quantity_before
+    cost_basis_reduction = users[current_user]["portfolio"][asset]["cost_basis"] * sold_ratio
+    users[current_user]["portfolio"][asset]["cost_basis"] -= cost_basis_reduction
+
     if users[current_user]["portfolio"][asset]["quantity"] <= 0:
       del users[current_user]["portfolio"][asset]
-      
+
   else:
     if not is_limit_order:
       print("Invalid action")
     return
 
   # Save to order history
-  users[current_user]["history"].append({"action": action, "asset": asset, "quantity": quantity, "price": price, "fee": fee})
+  users[current_user]["history"].append({"action": action, "asset": asset, "quantity": quantity, "price": price, "fee": fee}) # Fee already stored in history
   print(f"Order executed! {action} {quantity:.2f} {asset} @ {price:.2f} | Fee: {fee:.2f} | Net: {proceeds if action == "SELL" else -total_cost:+.2f}")
 
   save_data()
@@ -269,9 +303,11 @@ def view_market(market):
     if len(market[asset]["history"]) > 0:
       truncated_history = market[asset]["history"] 
       truncated_history = truncated_history[::-1][:5] # Take top five recent
+
       print("Prices (recent):")
       for prev_price in truncated_history:
         print(f"{prev_price:.2f}")
+
     print()
 
 def view_portfolio(current_user):
@@ -309,15 +345,15 @@ def view_history(current_user):
     print("You don't have any orders yet")
     return
   
-  
   print("Action\t Stock\t Quantity\t Price\t\t Fee")
   for history in history_list:
+    quantity = Decimal(history["quantity"])
     price = Decimal(history["price"])
     fee = Decimal(0)
     if "fee" in history:
-      fee = history["fee"]
-      
-    print(f"{history["action"]}\t {history["asset"]}\t {history["quantity"]:.2f}\t\t {price:.2f}\t\t {fee:.2f}")
+      fee = Decimal(history["fee"])
+
+    print(f"{history["action"]}\t {history["asset"]}\t {quantity:.2f}\t\t {price:.2f}\t\t {fee:.2f}")
 
 def save_data():
   # Note: type Decimal is not JSON serializable
@@ -344,12 +380,26 @@ def load_data():
         for asset in users[user]["portfolio"]:
           users[user]["portfolio"][asset]["quantity"] = Decimal(users[user]["portfolio"][asset]["quantity"])
           users[user]["portfolio"][asset]["cost_basis"] = Decimal(users[user]["portfolio"][asset]["cost_basis"])
+
+        if "pending_orders" in users[user]:
+          for pending_order in users[user]["pending_orders"]:
+            pending_order["quantity"] = Decimal(pending_order["quantity"])
+            pending_order["limit_price"] = Decimal(pending_order["limit_price"])
+
+        if "history" in user[users]:
+          for order in users[user]["history"]:
+            order["quantity"] = Decimal(order["quantity"])
+            order["price"] = Decimal(order["price"])
+            order["fee"] = Decimal(order["fee"])
       
-      # When loading market data, the prices are mapped to float type
+      # When loading market data, the prices are mapped to Decimal type
       # Make sure to convert them to Decimal
       market = data["market"]
       for asset in market:
         market[asset]["price"] = Decimal(market[asset]["price"])
+        market[asset]["history"] = [Decimal(p) for p in market[asset]["history"]]
+
+
   except FileNotFoundError:
     print("File cannot be found")
   except Exception as e:
@@ -374,6 +424,7 @@ def place_limit_order(current_user):
     if action is None or action == "":
       print("Please provide an action first")
     elif action != "BUY" and action != "SELL":
+
       print("Buy or Sell only")
     else:
       break
@@ -398,7 +449,7 @@ def place_limit_order(current_user):
   
   while True:
     limit_price = input("Limit Price: ").strip()
-    if license is None or limit_price == "":
+    if limit_price is None or limit_price == "":
       print("Please provide a limit price first")
       continue
     
@@ -434,6 +485,26 @@ def place_limit_order(current_user):
 
   print(f"[{iso_format}] Limit order placed! {action} {quantity:.2f} {asset} @ {limit_price:.2f}")
   
+def view_pending_orders(current_user):
+  if current_user is None or current_user == "":
+    print("You must log in first")
+    return
+
+  if "pending_orders" not in users[current_user] or not users[current_user]["pending_orders"]:
+    print("No pending orders")
+    return
+
+  print("\nDate\t\t\tType\tAction\tAsset\tQty\tLimit")
+  for pending_order in users[current_user]["pending_orders"]:
+    date_entry = pending_order["date_entry"]
+    order_type = pending_order["type"]
+    action = pending_order["action"]
+    asset = pending_order["asset"]
+    quantity = pending_order["quantity"]
+    limit_price = pending_order["limit_price"]
+
+    print(f"{date_entry}\t{order_type}\t{action}\t{asset}\t{quantity:.2f}\t{limit_price:.2f}")
+
 def main():
   global session, market
   
@@ -442,7 +513,7 @@ def main():
   if not market: # Populate if there's no market data yet
     init_market(["AAPL", "TSLA", "GOOG", "AAME", "ABAT", "ABNB", "ATLX"])
   
-  while True:
+  while True: # Main menu
     print("\nPyTrading: Console Edition")
     print("1. Register")
     print("2. Login")
@@ -452,8 +523,9 @@ def main():
     print("6. View portfolio")
     print("7. View history")
     print("8. Place limit order")
-    print("9. Log out")
-    print("10. Exit program")
+    print("9. View pending orders")
+    print("10. Log out")
+    print("11. Exit program")
 
     choice = input("\nEnter choice: ")
 
@@ -465,6 +537,7 @@ def main():
       view_market(market)
     elif choice == "4": # Refresh market
       update_market()
+      check_pending_orders()
       save_data()
     elif choice == "5": # Place order
       place_order(session["user"])
@@ -474,14 +547,17 @@ def main():
       view_history(session["user"])
     elif choice == "8": # Place limit order
       place_limit_order(session["user"])
-    elif choice == "9": # Log out
+      check_pending_orders()
+    elif choice == "9": # View pending orders
+      view_pending_orders(session["user"])
+    elif choice == "10": # Log out
       if session["user"] is None or session["user"] == "":
         print("You must log in first")
         continue
       save_data()
       session["user"] = ""
       print("You have successfully logged out!")
-    elif choice == "10": # Exit program
+    elif choice == "11": # Exit program
       session["user"] = "" # Make sure session is cleared
       print("Exiting program...")
       save_data()
@@ -489,8 +565,7 @@ def main():
     else:
       print("Invalid choice")
 
-    # Process after every refresh
-    check_pending_orders()
+    # FIXME: There's a bug on the saving/loading of market history
     
 if __name__ == "__main__":
   main()
